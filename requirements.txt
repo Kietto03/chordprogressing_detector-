@@ -1,0 +1,10 @@
+librosa
+numpy
+pandas
+h5py
+tqdm
+matplotlib
+torch
+seaborn
+streamlit
+plotly
