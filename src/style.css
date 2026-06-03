@@ -1,0 +1,150 @@
+/* style.css - Premium Modern Tech styling for AI Chord Progression Analyzer */
+
+/* Global App Styling overrides */
+.stApp {
+    background-color: #F8FAFC !important;
+}
+
+/* Base typography setup */
+h1, h2, h3, h4, h5, h6, p, span, label, li, div {
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    color: #1E293B;
+}
+
+/* Luminous Hero Banner Container */
+.hero-container {
+    background: linear-gradient(135deg, #7928CA 0%, #00DFD8 100%);
+    padding: 3.5rem 2rem;
+    border-radius: 20px;
+    text-align: center;
+    margin-bottom: 2.5rem;
+    box-shadow: 0 15px 35px rgba(121, 40, 202, 0.1);
+    position: relative;
+    overflow: hidden;
+}
+
+.hero-title {
+    font-family: 'Outfit', sans-serif !important;
+    font-size: 3rem !important;
+    font-weight: 800 !important;
+    color: white !important;
+    margin-bottom: 0.5rem !important;
+    letter-spacing: -0.03em;
+    text-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+}
+
+.hero-subtitle {
+    font-family: 'Inter', sans-serif !important;
+    font-size: 1.2rem !important;
+    font-weight: 400 !important;
+    color: rgba(255, 255, 255, 0.9) !important;
+    max-width: 800px;
+    margin: 0 auto !important;
+}
+
+/* Premium Card Components for Metrics */
+.metric-card {
+    background: white !important;
+    border-radius: 16px;
+    padding: 1.5rem;
+    border: 1px solid #E2E8F0;
+    box-shadow: 0 6px 18px rgba(148, 163, 184, 0.04);
+    text-align: center;
+    transition: all 0.25s ease-in-out;
+}
+
+.metric-card:hover {
+    transform: translateY(-5px);
+    box-shadow: 0 12px 28px rgba(121, 40, 202, 0.06);
+    border-color: #7928CA;
+}
+
+.metric-title {
+    font-family: 'Outfit', sans-serif;
+    font-size: 0.9rem;
+    color: #64748B !important;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    margin-bottom: 0.4rem;
+}
+
+.metric-value {
+    font-family: 'Outfit', sans-serif;
+    font-size: 2.1rem;
+    font-weight: 800;
+    color: #0F172A !important;
+}
+
+/* Clean Centered File Uploader overrides */
+.stFileUploader {
+    background: white !important;
+    border: 2px dashed #00DFD8 !important;
+    border-radius: 16px !important;
+    padding: 1.25rem !important;
+    box-shadow: 0 4px 12px rgba(148, 163, 184, 0.01) !important;
+    transition: all 0.25s ease !important;
+}
+
+.stFileUploader:hover {
+    border-color: #7928CA !important;
+    box-shadow: 0 10px 24px rgba(121, 40, 202, 0.06) !important;
+}
+
+/* Layout section header tweaks */
+.section-title {
+    font-family: 'Outfit', sans-serif !important;
+    font-size: 1.45rem !important;
+    font-weight: 700 !important;
+    color: #0F172A !important;
+    margin-top: 2rem !important;
+    margin-bottom: 0.75rem !important;
+    letter-spacing: -0.01em;
+}
+
+/* ==========================================
+   Widescreen Plotly Card & Sidebar Styling
+   ========================================== */
+
+/* Plotly canvas container card */
+.canvas-card {
+    background: white !important;
+    border-radius: 16px;
+    padding: 1.5rem;
+    border: 1px solid #E2E8F0;
+    box-shadow: 0 6px 18px rgba(148, 163, 184, 0.04);
+    margin-bottom: 2rem;
+}
+
+/* Sidebar Profile Badges Container */
+.sidebar-badge-container {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    margin-top: 15px;
+    margin-bottom: 20px;
+}
+
+.sidebar-badge {
+    background: #FFFFFF;
+    border: 1px solid #E2E8F0;
+    border-radius: 10px;
+    padding: 10px 14px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    box-shadow: 0 2px 6px rgba(148, 163, 184, 0.03);
+}
+
+.badge-label {
+    font-size: 0.8rem;
+    color: #64748B;
+    font-weight: 600;
+}
+
+.badge-value {
+    font-size: 0.85rem;
+    color: #0F172A;
+    font-weight: 700;
+    font-family: 'Outfit', sans-serif;
+}

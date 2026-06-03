@@ -200,7 +200,7 @@ class AudioETLPipeline:
 
         audio_extensions = ('.mp3', '.wav', '.ogg', '.flac', '.m4a')
         processed_count = 0
-        target_limit = 5
+        target_limit = 10
 
         # Scan raw directory recursively for folders containing .lab files
         folders_to_check = []
