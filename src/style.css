@@ -148,3 +148,91 @@ h1, h2, h3, h4, h5, h6, p, span, label, li, div {
     font-weight: 700;
     font-family: 'Outfit', sans-serif;
 }
+
+/* ==========================================
+   Chordify Rhythmic Beat-Grid Layout
+   ========================================== */
+
+.chordify-grid-container {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 0px;
+    padding: 1.5rem;
+    background: #FFFFFF !important;
+    border: 1px solid #E2E8F0;
+    border-radius: 16px;
+    box-shadow: 0 4px 12px rgba(148, 163, 184, 0.03);
+    overflow-x: auto;
+    white-space: nowrap;
+    scroll-behavior: smooth;
+    margin-bottom: 2rem;
+}
+
+/* Custom scrollbar for horizontal chord workspace */
+.chordify-grid-container::-webkit-scrollbar {
+    height: 10px;
+}
+.chordify-grid-container::-webkit-scrollbar-track {
+    background: #F8FAFC;
+    border-radius: 6px;
+}
+.chordify-grid-container::-webkit-scrollbar-thumb {
+    background: #E2E8F0;
+    border-radius: 6px;
+    border: 2px solid #F8FAFC;
+}
+.chordify-grid-container::-webkit-scrollbar-thumb:hover {
+    background: #CBD5E1;
+}
+
+.beat-cell {
+    display: inline-flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    width: 75px;
+    min-width: 75px;
+    height: 75px;
+    min-height: 75px;
+    background: #FFFFFF;
+    border: 1px solid #E2E8F0;
+    margin-left: -1px;
+    cursor: pointer;
+    user-select: none;
+    box-sizing: border-box;
+    position: relative;
+    transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+
+.beat-cell:hover {
+    background-color: #F8FAFC;
+    border-color: #CBD5E1;
+    z-index: 2;
+}
+
+.beat-cell.active {
+    background-color: rgba(40, 155, 152, 0.06) !important;
+    border-bottom: 5px solid #289B98 !important;
+    z-index: 3;
+}
+
+.card-chord-name {
+    font-family: 'Outfit', sans-serif !important;
+    font-size: 1.15rem !important;
+    font-weight: 800 !important;
+    color: #1E293B !important;
+    margin-bottom: 2px !important;
+    letter-spacing: -0.01em;
+}
+
+.card-roman {
+    font-family: 'Inter', sans-serif !important;
+    font-size: 0.72rem !important;
+    font-weight: 600 !important;
+    color: #7928CA !important;
+    letter-spacing: 0.03em;
+    text-transform: uppercase;
+}
+
+

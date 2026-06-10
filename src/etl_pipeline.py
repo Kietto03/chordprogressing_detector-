@@ -7,6 +7,14 @@ import pandas as pd
 import librosa
 from tqdm import tqdm
 
+from src.config import (
+    SR as TARGET_SR,
+    HOP_LENGTH,
+    N_BINS,
+    DURATION_TOLERANCE_SEC,
+    STRICT_DURATION_CHECK,
+)
+
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -76,15 +84,27 @@ class ChordVocabularyMapper:
 
 
 class AudioETLPipeline:
-    def __init__(self, raw_dir='data/raw/McGill-Billboard', processed_dir='data/processed', target_sr=22050, hop_length=512, n_bins=84):
+    def __init__(
+        self,
+        raw_dir: str = 'data/raw/McGill-Billboard',
+        processed_dir: str = 'data/processed',
+        target_sr: int = TARGET_SR,
+        hop_length: int = HOP_LENGTH,
+        n_bins: int = N_BINS,
+        strict_duration_check: bool = STRICT_DURATION_CHECK,
+    ):
         """
         Initialize the ETL pipeline with directories and audio processing parameters.
+
+        strict_duration_check: if True, raise on large audio/lab duration mismatches (PR6).
+                               Default is False (warning + flag only) for research flexibility.
         """
         self.raw_dir = raw_dir
         self.processed_dir = processed_dir
         self.target_sr = target_sr
         self.hop_length = hop_length
         self.n_bins = n_bins
+        self.strict_duration_check = strict_duration_check
         
         # Create processed directory if it doesn't exist
         os.makedirs(self.processed_dir, exist_ok=True)
@@ -124,30 +144,37 @@ class AudioETLPipeline:
             logger.error(f"Error computing CQT: {e}")
             return None
 
-    def load_to_hdf5(self, song_id, cqt_matrix, labels_array):
+    def load_to_hdf5(self, song_id, cqt_matrix, labels_array, **metadata):
         """
         Save the CQT matrix and aligned labels to HDF5 file with gzip compression.
+        Optimizes chunk shapes for 215-frame contiguous segment loads.
+
+        Any keyword args in **metadata are stored as HDF5 attributes (e.g. audio_duration, lab_duration).
+        This supports PR6 data validation.
         """
         try:
             output_path = os.path.join(self.processed_dir, f"{song_id}.h5")
             with h5py.File(output_path, 'w') as f:
-                f.create_dataset('cqt', data=cqt_matrix, compression='gzip')
-                f.create_dataset('labels', data=labels_array, compression='gzip')
+                # Specify chunk sizes that align with model segment loads (215 frames)
+                cqt_chunks = (cqt_matrix.shape[0], min(215, cqt_matrix.shape[1]))
+                label_chunks = (min(215, len(labels_array)),)
+                
+                f.create_dataset('cqt', data=cqt_matrix, compression='gzip', chunks=cqt_chunks)
+                f.create_dataset('labels', data=labels_array, compression='gzip', chunks=label_chunks)
+
+                # Store optional metadata (PR6)
+                for key, value in metadata.items():
+                    try:
+                        f.attrs[key] = value
+                    except Exception:
+                        f.attrs[key] = str(value)
+
             logger.info(f"Successfully saved CQT matrix and labels to HDF5: {output_path}")
             return output_path
         except Exception as e:
             logger.error(f"Error saving HDF5 for song {song_id}: {e}")
             return None
 
-    def _generate_dummy_audio(self, duration=30):
-        """
-        Generate a dummy sine wave audio waveform of specified duration (in seconds).
-        """
-        logger.info(f"Generating dummy audio of duration {duration:.2f}s at sample rate {self.target_sr}")
-        # Standard A440 sine wave
-        t = np.linspace(0, duration, int(self.target_sr * duration), endpoint=False)
-        y = 0.5 * np.sin(2 * np.pi * 440.0 * t)
-        return y
 
     def parse_labels(self, label_path):
         """
@@ -187,20 +214,18 @@ class AudioETLPipeline:
                 
         return frame_labels
 
-    def run_pipeline(self):
+    def run_pipeline(self, target_limit=None):
         """
         Iterate through raw folders, locate label files, find/generate audio,
         transform to CQT, align labels to frames, and save as HDF5 datasets.
-        Process the first 5 folders (as a test run).
         """
         logger.info("Starting ETL pipeline...")
         if not os.path.exists(self.raw_dir):
             logger.error(f"Raw directory does not exist: {self.raw_dir}")
             return
 
-        audio_extensions = ('.mp3', '.wav', '.ogg', '.flac', '.m4a')
+        audio_extensions = ('.mp3', '.wav', '.ogg', '.flac', '.m4a', '.webm')
         processed_count = 0
-        target_limit = 10
 
         # Scan raw directory recursively for folders containing .lab files
         folders_to_check = []
@@ -216,7 +241,13 @@ class AudioETLPipeline:
 
         # Sort the folders for consistent ordering
         folders_to_check.sort(key=lambda x: x[0])
-        folders_to_process = folders_to_check[:target_limit]
+        
+        if target_limit is not None:
+            logger.info(f"Limiting processing to the first {target_limit} folders.")
+            folders_to_process = folders_to_check[:target_limit]
+        else:
+            logger.info("Processing all folders.")
+            folders_to_process = folders_to_check
 
         for root, lab_files, all_files in tqdm(folders_to_process, desc="Processing Song Folders"):
             # Select preferred annotation file if multiple exist
@@ -244,12 +275,23 @@ class AudioETLPipeline:
                 y = self.extract_audio(audio_path)
 
             if y is None:
-                # If no audio, print warning and generate dummy sine wave audio matching total duration
-                total_duration = labels_df.iloc[-1]['end_time']
-                if total_duration <= 0:
-                    total_duration = 30.0  # Fallback duration
-                logger.warning(f"No audio file in {root}. Using generated dummy audio of {total_duration:.2f}s.")
-                y = self._generate_dummy_audio(total_duration)
+                logger.warning(f"No audio file in {root}. Skipping this song.")
+                continue
+
+            # PR6: Duration validation between downloaded audio and .lab annotations
+            audio_duration = len(y) / self.target_sr
+            lab_duration = float(labels_df['end_time'].max()) if not labels_df.empty else 0.0
+            delta = abs(audio_duration - lab_duration)
+
+            if delta > DURATION_TOLERANCE_SEC:
+                msg = (f"Duration mismatch in {root}: audio={audio_duration:.2f}s, "
+                       f"lab={lab_duration:.2f}s, delta={delta:.2f}s "
+                       f"(tolerance={DURATION_TOLERANCE_SEC}s)")
+                if getattr(self, 'strict_duration_check', False):
+                    logger.error(msg + " — STRICT mode enabled, skipping song.")
+                    continue
+                else:
+                    logger.warning(msg + " — proceeding (possible misalignment from YouTube download)")
 
             # CQT extraction
             cqt_matrix = self.transform_to_cqt(y)
@@ -267,13 +309,24 @@ class AudioETLPipeline:
             dir_name = os.path.basename(root)
             song_id = dir_name if dir_name.isdigit() else os.path.splitext(lab_file)[0]
 
-            # Write HDF5 file
-            self.load_to_hdf5(song_id, cqt_matrix, labels_array)
+            # Write HDF5 file (PR6: store duration metadata for later validation)
+            self.load_to_hdf5(
+                song_id, cqt_matrix, labels_array,
+                audio_duration=audio_duration,
+                lab_duration=lab_duration,
+                duration_delta=delta,
+            )
             processed_count += 1
 
         logger.info(f"Pipeline finished. Processed {processed_count} files.")
 
 
 if __name__ == "__main__":
-    pipeline = AudioETLPipeline()
-    pipeline.run_pipeline()
+    import argparse
+    parser = argparse.ArgumentParser(description="Run Audio ETL Pipeline (PR6 hardening)")
+    parser.add_argument('--limit', type=int, default=None, help="Limit the number of songs to process")
+    parser.add_argument('--strict', action='store_true', help="Enable strict duration checking (fail on mismatches > tolerance)")
+    args = parser.parse_args()
+    
+    pipeline = AudioETLPipeline(strict_duration_check=args.strict)
+    pipeline.run_pipeline(target_limit=args.limit)

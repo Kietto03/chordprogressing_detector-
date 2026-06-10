@@ -28,24 +28,33 @@ class PositionalEncoding(nn.Module):
 
 class CRNNChordBaseline(nn.Module):
     """
-    CRNN Baseline for Audio Chord Recognition.
-    Applies Conv1d layers along the time frames (treating CQT bins as channels)
+    Optimized CRNN Baseline for Audio Chord Recognition.
+    Applies Conv2d layers along the spectro-temporal dimensions (time and frequency)
     followed by a Bidirectional GRU and a Linear projection to 25 chord classes.
     """
     def __init__(self, input_bins=84, num_classes=25, rnn_hidden=128, dropout=0.1):
         super().__init__()
-        # Conv1d expects input as [batch_size, in_channels, seq_len]
-        # We treat CQT frequency bins (84) as input channels
-        self.conv = nn.Sequential(
-            nn.Conv1d(in_channels=input_bins, out_channels=128, kernel_size=3, padding=1),
-            nn.BatchNorm1d(128),
+        # Conv2D expects input as [batch_size, 1, seq_len, input_bins]
+        # We downsample the frequency axis while preserving temporal frame rate
+        self.conv_frontend = nn.Sequential(
+            nn.Conv2d(1, 32, kernel_size=(3, 3), padding=(1, 1)),
+            nn.BatchNorm2d(32),
             nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Conv1d(in_channels=128, out_channels=128, kernel_size=3, padding=1),
-            nn.BatchNorm1d(128),
+            nn.Conv2d(32, 64, kernel_size=(3, 3), padding=(1, 1)),
+            nn.BatchNorm2d(64),
             nn.ReLU(),
-            nn.Dropout(dropout)
+            nn.MaxPool2d(kernel_size=(1, 2)),  # Downsamples freq: 84 -> 42
+            nn.Conv2d(64, 64, kernel_size=(3, 3), padding=(1, 1)),
+            nn.BatchNorm2d(64),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=(1, 2)),  # Downsamples freq: 42 -> 21
         )
+        
+        self.flat_dim = 64 * (input_bins // 4)
+        
+        # Linear projection to map Conv2D flat features to GRU input size
+        self.input_projection = nn.Linear(self.flat_dim, 128)
+        self.input_dropout = nn.Dropout(dropout)
         
         # GRU expects input as [batch_size, seq_len, input_size]
         self.rnn = nn.GRU(
@@ -54,54 +63,101 @@ class CRNNChordBaseline(nn.Module):
             num_layers=2, 
             bidirectional=True, 
             batch_first=True,
-            dropout=dropout if num_classes > 1 else 0.0 # PyTorch GRU dropout only applies if num_layers > 1
+            dropout=dropout
         )
         
-        # Fully connected maps bidirectional GRU output (hidden_size * 2) to chord classes
+        # LayerNorm stabilizes activations prior to classification
+        self.norm = nn.LayerNorm(rnn_hidden * 2)
         self.fc = nn.Linear(rnn_hidden * 2, num_classes)
 
     def forward(self, x):
         # Input x shape: [batch_size, seq_len, input_bins] (e.g. [32, 215, 84])
         
-        # 1. Permute to [batch_size, input_bins, seq_len] for Conv1d
-        x = x.permute(0, 2, 1)
+        # 1. Reshape to [batch_size, 1, seq_len, input_bins] for Conv2D
+        x_conv = x.unsqueeze(1)
         
-        # 2. Extract local spatial/spectral features
-        x = self.conv(x)  # shape: [batch_size, 128, seq_len]
+        # 2. Extract spectro-temporal features
+        feat = self.conv_frontend(x_conv)  # shape: [batch_size, 64, seq_len, 21]
         
-        # 3. Permute back to [batch_size, seq_len, 128] for GRU
-        x = x.permute(0, 2, 1)
+        # 3. Permute and flatten to [batch_size, seq_len, flat_dim]
+        feat = feat.permute(0, 2, 1, 3).contiguous()
+        feat = feat.view(feat.size(0), feat.size(1), -1)
         
-        # 4. Process temporal dependencies
+        # 4. Map to GRU dimension
+        x = self.input_projection(feat)
+        x = self.input_dropout(x)
+        
+        # 5. Process temporal dependencies
         x, _ = self.rnn(x)  # shape: [batch_size, seq_len, rnn_hidden * 2]
         
-        # 5. Classify each frame
-        logits = self.fc(x)  # shape: [batch_size, seq_len, num_classes] (e.g. [32, 215, 25])
+        # 6. Apply normalization
+        x = self.norm(x)
+        
+        # 7. Classify each frame
+        logits = self.fc(x)  # shape: [batch_size, seq_len, num_classes]
         return logits
 
 
 class TransformerChordRecognizer(nn.Module):
     """
-    Transformer-based Frame-level Chord Recognizer.
-    Projects 84 CQT bins to a higher embedding space, adds Positional Encoding,
+    Optimized Transformer-based Frame-level Chord Recognizer.
+    Projects 2D-Convolutional features to embedding space, adds Positional Encoding,
     processes with a multi-layer Transformer Encoder, and classifies each frame.
     """
     def __init__(self, input_bins=84, num_classes=25, d_model=256, nhead=8, num_layers=4, dim_feedforward=512, dropout=0.1):
         super().__init__()
+        
+        # Conv2D Front-End preserves temporal framerate, downsamples frequency by 4
+        self.conv_frontend = nn.Sequential(
+            nn.Conv2d(1, 32, kernel_size=(3, 3), padding=(1, 1)),
+            nn.BatchNorm2d(32),
+            nn.ReLU(),
+            nn.Conv2d(32, 64, kernel_size=(3, 3), padding=(1, 1)),
+            nn.BatchNorm2d(64),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=(1, 2)),  # Downsamples freq: 84 -> 42
+            nn.Conv2d(64, 64, kernel_size=(3, 3), padding=(1, 1)),
+            nn.BatchNorm2d(64),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=(1, 2)),  # Downsamples freq: 42 -> 21
+        )
+        
+        self.flat_dim = 64 * (input_bins // 4)
         self.d_model = d_model
-        # Projects [batch_size, seq_len, 84] -> [batch_size, seq_len, d_model]
-        self.input_projection = nn.Linear(input_bins, d_model)
+        
+        # Linear projection maps flattened features to d_model
+        self.input_projection = nn.Linear(self.flat_dim, d_model)
         self.pos_encoder = PositionalEncoding(d_model=d_model)
+        self.input_dropout = nn.Dropout(dropout)
         
         # Transformer Encoder Stack
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=d_model,
-            nhead=nhead,
-            dim_feedforward=dim_feedforward,
-            dropout=dropout,
-            batch_first=True
-        )
+        # enable_nested_tensor=False to suppress the Pre-LN warning
+        # (see https://github.com/pytorch/pytorch/issues/100988 and design plan)
+        # Try to pass enable_nested_tensor=False to suppress the Pre-LN warning on older PyTorch versions.
+        # Fall back if the argument has been removed in newer PyTorch versions.
+        try:
+            encoder_layer = nn.TransformerEncoderLayer(
+                d_model=d_model,
+                nhead=nhead,
+                dim_feedforward=dim_feedforward,
+                dropout=dropout,
+                batch_first=True,
+                norm_first=True,
+                enable_nested_tensor=False,
+            )
+        except TypeError:
+            encoder_layer = nn.TransformerEncoderLayer(
+                d_model=d_model,
+                nhead=nhead,
+                dim_feedforward=dim_feedforward,
+                dropout=dropout,
+                batch_first=True,
+                norm_first=True,
+            )
         self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        
+        # CRITICAL FIX: Add LayerNorm at output of Pre-LN Transformer encoder
+        self.final_norm = nn.LayerNorm(d_model)
         
         # Final classification layer
         self.fc = nn.Linear(d_model, num_classes)
@@ -109,17 +165,31 @@ class TransformerChordRecognizer(nn.Module):
     def forward(self, x):
         # Input x shape: [batch_size, seq_len, input_bins]
         
-        # 1. Projection to embedding dimension
-        x = self.input_projection(x)  # shape: [batch_size, seq_len, d_model]
-        x = x * math.sqrt(self.d_model) # CRITICAL FIX
+        # 1. Reshape to [batch_size, 1, seq_len, input_bins] for Conv2D
+        x_conv = x.unsqueeze(1)
         
-        # 2. Add Positional Encoding
-        x = self.pos_encoder(x)  # shape: [batch_size, seq_len, d_model]
+        # 2. Extract spectro-temporal features
+        feat = self.conv_frontend(x_conv)  # shape: [batch_size, 64, seq_len, 21]
         
-        # 3. Process with Transformer Encoder (Self-Attention across time frames)
+        # 3. Permute and flatten to [batch_size, seq_len, flat_dim]
+        feat = feat.permute(0, 2, 1, 3).contiguous()
+        feat = feat.view(feat.size(0), feat.size(1), -1)
+        
+        # 4. Projection to embedding dimension
+        x = self.input_projection(feat)  # shape: [batch_size, seq_len, d_model]
+        x = x * math.sqrt(self.d_model)
+        
+        # 5. Add Positional Encoding and Dropout
+        x = self.pos_encoder(x)
+        x = self.input_dropout(x)
+        
+        # 6. Process with Transformer Encoder (Self-Attention across time frames)
         x = self.transformer_encoder(x)  # shape: [batch_size, seq_len, d_model]
         
-        # 4. Classify each frame
+        # 7. Apply final normalization
+        x = self.final_norm(x)
+        
+        # 8. Classify each frame
         logits = self.fc(x)  # shape: [batch_size, seq_len, num_classes]
         return logits
 

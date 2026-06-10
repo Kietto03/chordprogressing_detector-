@@ -1,0 +1,62 @@
+[project]
+name = "chord-analyzer"
+version = "0.1.0"
+description = "End-to-end Audio Chord Recognition (ACR) research system using Transformer/CRNN on CQT features from the McGill-Billboard dataset"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [
+    {name = "Chord Processing Identifier Contributors"}
+]
+keywords = ["audio", "chord-recognition", "music-information-retrieval", "deep-learning", "transformer", "streamlit"]
+dependencies = [
+    "librosa>=0.10.0,<0.11",
+    "numpy>=1.24,<2.2",
+    "pandas>=2.0,<3.0",
+    "h5py>=3.9,<4.0",
+    "tqdm>=4.66",
+    "matplotlib>=3.8",
+    "torch>=2.1",
+    "seaborn>=0.13",
+    "streamlit>=1.28,<1.42",
+    "plotly>=5.18",
+    "scipy>=1.11",
+    "yt-dlp>=2024.1",
+    "scikit-learn>=1.4,<1.6",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "ruff>=0.3",
+    "mypy>=1.8",
+]
+
+[project.urls]
+Homepage = "https://github.com/Kietto03/chordprogressing_detector-"
+Repository = "https://github.com/Kietto03/chordprogressing_detector-"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-q --tb=short"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+ignore = ["E501"]  # line length handled
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true
+strict = false  # start lenient for research code
+
+# Version is static in [project] above for simplicity (PR9 packaging)

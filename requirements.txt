@@ -1,10 +1,24 @@
-librosa
-numpy
-pandas
-h5py
-tqdm
-matplotlib
-torch
-seaborn
-streamlit
-plotly
+# Core dependencies (pinned for reproducibility)
+# Post PR 1-10 modernization (see docs/implementation-plan.md)
+# Run `pip freeze` in a clean venv after `pip install -r requirements.txt` to refresh if needed.
+#
+# Optional MIREX metrics (PR7): pip install mir_eval  (graceful fallback if missing)
+librosa>=0.10.0,<0.11
+numpy>=1.24,<2.2
+pandas>=2.0,<3.0
+h5py>=3.9,<4.0
+tqdm>=4.66
+matplotlib>=3.8
+torch>=2.1
+seaborn>=0.13
+streamlit>=1.28,<1.42
+plotly>=5.18
+scipy>=1.11
+yt-dlp>=2024.1
+scikit-learn>=1.4,<1.6
+
+# Optional / dev (install with: pip install -e '.[dev]' after pyproject.toml)
+# pytest>=7.0
+# pytest-cov>=4.0
+# ruff>=0.3
+# mypy>=1.8

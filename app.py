@@ -9,17 +9,49 @@ import io
 import base64
 import json
 from scipy.io import wavfile
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
-
 from src.model import TransformerChordRecognizer, CRNNChordBaseline
 from src.etl_pipeline import ChordVocabularyMapper
+from src.config import (
+    CHUNK_LENGTH_FRAMES,
+    HOP_SIZE as DEFAULT_HOP_SIZE,
+    N_BINS,
+    HOP_LENGTH,
+    SR as TARGET_SR,
+)
+try:
+    from src.viz import build_chord_timeline_figure
+except Exception:
+    from viz import build_chord_timeline_figure  # fallback when running as script
 
 # Helper function to load external style sheet cleanly without leakage
 def load_css(file_name="src/style.css"):
     if os.path.exists(file_name):
         with open(file_name, "r", encoding="utf-8") as f:
             st.markdown(f"<style>{f.read()}</style>", unsafe_allow_html=True)
+
+# Convert sharp chords to flat chords if flat spelling is preferred
+def spell_chord(chord_name, use_flats=True):
+    if not chord_name or chord_name == 'N':
+        return 'N'
+    if not use_flats:
+        return chord_name
+        
+    parts = chord_name.split(':')
+    root = parts[0]
+    quality = parts[1] if len(parts) > 1 else ''
+    
+    flat_roots = {
+        'C#': 'Db',
+        'D#': 'Eb',
+        'F#': 'Gb',
+        'G#': 'Ab',
+        'A#': 'Bb'
+    }
+    
+    new_root = flat_roots.get(root, root)
+    if quality:
+        return f"{new_root}:{quality}"
+    return new_root
 
 # Helper function to clean chord names for human-readable display
 def clean_chord_name(chord_name):
@@ -192,38 +224,7 @@ def get_chord_midi_notes(chord_name):
         
     return [root_midi + i for i in intervals]
 
-# Assign Chord octave center pitches dynamically using Voice Leading Heuristic
-def assign_chord_pitches(df_chords):
-    chromatic = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
-    flats = {'Db': 'C#', 'Eb': 'D#', 'Gb': 'F#', 'Ab': 'G#', 'Bb': 'A#'}
-    
-    pitches = []
-    prev_pitch = 24 # Start at C2 (pitch index 24)
-    
-    for _, row in df_chords.iterrows():
-        root = row['Root']
-        root_norm = flats.get(root, root)
-        if root_norm not in chromatic:
-            pitches.append(prev_pitch)
-            continue
-            
-        semi = chromatic.index(root_norm)
-        
-        # Select octave from [1, 2, 3] to minimize vertical pitch jump
-        best_pitch = prev_pitch
-        min_dist = 999
-        for octave in [1, 2, 3]:
-            pitch = octave * 12 + semi
-            dist = abs(pitch - prev_pitch)
-            if dist < min_dist:
-                min_dist = dist
-                best_pitch = pitch
-                
-        pitches.append(best_pitch)
-        prev_pitch = best_pitch
-        
-    df_chords['Pitch'] = pitches
-    return df_chords
+
 
 # Render Interactive SVG Volume Dial
 def render_dial(label, value):
@@ -328,84 +329,7 @@ def create_midi_file(df_chords, tempo_bpm=120):
     
     return bytes(header + track)
 
-# Task 3: Synthesize guide track containing pure sine waves + harmonics matching the note-level map
-def synthesize_chords_guide(df_chords, duration, sr=22050):
-    num_samples = int(duration * sr)
-    audio_data = np.zeros(num_samples, dtype=np.float32)
-    
-    # MIDI note to frequency helper
-    def m2f(m):
-        return 440.0 * (2.0 ** ((m - 69.0) / 12.0))
-        
-    for _, row in df_chords.iterrows():
-        start_time = row['Start Time (s)']
-        end_time = row['End Time (s)']
-        chord = row['Chord']
-        
-        if chord == 'N':
-            continue
-            
-        notes = get_chord_midi_notes(chord)
-        
-        start_sample = int(start_time * sr)
-        end_sample = min(num_samples, int(end_time * sr))
-        t = np.arange(end_sample - start_sample) / sr
-        
-        chord_wave = np.zeros(end_sample - start_sample, dtype=np.float32)
-        for note in notes:
-            freq = m2f(note)
-            # Create a simple rich organ sound: fundamental + 1st harmonic
-            wave = 0.6 * np.sin(2.0 * np.pi * freq * t) + 0.3 * np.sin(4.0 * np.pi * freq * t)
-            chord_wave += wave
-            
-        if len(notes) > 0:
-            chord_wave = chord_wave / len(notes)
-            
-        # Apply fade-in and fade-out to prevent pops/clicks
-        fade_len = min(int(0.02 * sr), len(chord_wave) // 2)
-        if fade_len > 0:
-            fade_in = np.linspace(0.0, 1.0, fade_len)
-            fade_out = np.linspace(1.0, 0.0, fade_len)
-            chord_wave[:fade_len] *= fade_in
-            chord_wave[-fade_len:] *= fade_out
-            
-        audio_data[start_sample:end_sample] = chord_wave
-        
-    # Scale to 16-bit integer PCM WAV format bytes
-    audio_data = np.clip(audio_data, -1.0, 1.0)
-    audio_int16 = (audio_data * 32767).astype(np.int16)
-    
-    wav_bytes_io = io.BytesIO()
-    wavfile.write(wav_bytes_io, sr, audio_int16)
-    return wav_bytes_io.getvalue()
 
-# Mix backing audio and chord guide audio in Python on the backend
-def mix_audio_tracks(backing_y, guide_wav_bytes, backing_vol, guide_vol, sr=22050):
-    try:
-        if guide_wav_bytes is None:
-            return y_to_wav_bytes(backing_y, sr)
-            
-        guide_sr, guide_data = wavfile.read(io.BytesIO(guide_wav_bytes))
-        guide_y = guide_data.astype(np.float32) / 32767.0
-        
-        length = min(len(backing_y), len(guide_y))
-        mixed = (backing_y[:length] * backing_vol) + (guide_y[:length] * guide_vol)
-        
-        # Normalize to prevent digital clipping
-        max_val = np.max(np.abs(mixed))
-        if max_val > 1.0:
-            mixed = mixed / max_val
-            
-        mixed_int16 = (mixed * 32767).astype(np.int16)
-        wav_bytes_io = io.BytesIO()
-        wavfile.write(wav_bytes_io, sr, mixed_int16)
-        return wav_bytes_io.getvalue()
-    except Exception as e:
-        # Safe fallback: return raw backing audio WAV bytes
-        try:
-            return y_to_wav_bytes(backing_y, sr)
-        except Exception:
-            return b""
 
 def y_to_wav_bytes(y, sr=22050):
     y_scaled = np.clip(y, -1.0, 1.0)
@@ -435,34 +359,37 @@ load_css("src/style.css")
 # Initialize session state variables
 if 'audio_vol' not in st.session_state:
     st.session_state.audio_vol = 0.8
-if 'chord_vol' not in st.session_state:
-    st.session_state.chord_vol = 0.5
 if 'playing' not in st.session_state:
     st.session_state.playing = False
-if 'guide_wav' not in st.session_state:
-    st.session_state.guide_wav = None
 
 # 2. Hero Banner Header Injection
-st.markdown("""
-    <div class="hero-container">
-        <h1 class="hero-title">🎵 AI Chord Progression Analyzer & Transcriber</h1>
-        <p class="hero-subtitle">Academic Defense Demonstration: Real-Time Audio Chord Transcription & Spectro-Temporal Alignment using Transformer-Attention Architecture</p>
-    </div>
-    """, unsafe_allow_html=True)
+st.markdown(
+    '<div class="hero-container">'
+    '<h1 class="hero-title">🎵 AI Chord Progression Analyzer & Transcriber</h1>'
+    '<p class="hero-subtitle">Academic Defense Demonstration: Real-Time Audio Chord Transcription & Spectro-Temporal Alignment using Transformer-Attention Architecture</p>'
+    '</div>',
+    unsafe_allow_html=True
+)
 
 # 3. Sidebar Control Card Layout
-st.sidebar.markdown("""
-    <div style='margin-bottom:1.5rem;'>
-        <h3 style='font-family:Outfit,sans-serif;font-weight:700;margin:0;color:#0F172A;'>🔧 Control panel</h3>
-        <p style='font-size:0.85rem;color:#64748B;margin:0;'>Configure pipeline execution settings</p>
-    </div>
-    """, unsafe_allow_html=True)
+st.sidebar.markdown(
+    '<div style="margin-bottom:1.5rem;">'
+    '<h3 style="font-family:Outfit,sans-serif;font-weight:700;margin:0;color:#0F172A;">🔧 Control panel</h3>'
+    '<p style="font-size:0.85rem;color:#64748B;margin:0;">Configure pipeline execution settings</p>'
+    '</div>',
+    unsafe_allow_html=True
+)
 
 model_type = st.sidebar.selectbox(
     "Select Model Architecture", 
     ["Transformer", "CRNN"], 
     help="Transformer leverages global attention and positional encoding, while the CRNN baseline uses convolutional layers and RNN recurrence."
 )
+
+# Early check for model checkpoint
+chk_path = "models/best_model.pth" if model_type == "Transformer" else "models/best_model_crnn.pth"
+if not os.path.exists(chk_path):
+    st.sidebar.error(f"⚠️ Checkpoint `{chk_path}` not found! Please run the training script `train.py` for this variant first.")
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("<h4 style='font-family:Outfit,sans-serif;font-weight:700;color:#0F172A;'>📁 File Upload Zone</h4>", unsafe_allow_html=True)
@@ -500,6 +427,18 @@ def estimate_tempo_and_key(y, sr):
     else:
         key = f"{pitches[best_min_idx]} Minor"
         
+    # Normalize sharp key signatures to standard flat spellings where appropriate
+    flat_key_map = {
+        'A# Major': 'Bb Major',
+        'A# Minor': 'Bb Minor',
+        'D# Major': 'Eb Major',
+        'D# Minor': 'Eb Minor',
+        'G# Major': 'Ab Major',
+        'G# Minor': 'Ab Minor',
+        'C# Major': 'Db Major',
+        'F# Major': 'Gb Major',
+    }
+    key = flat_key_map.get(key, key)
     return tempo, key
 
 
@@ -513,10 +452,10 @@ def load_audio(file_path):
 
 
 def predict_chords(y, sr, model_type, status_drawer):
-    hop_length = 512
-    n_bins = 84
-    chunk_length = 5000
-    hop_size = 2500 # 50% overlap
+    hop_length = HOP_LENGTH
+    n_bins = N_BINS
+    chunk_length = CHUNK_LENGTH_FRAMES  # Align sequence length with training!
+    hop_size = DEFAULT_HOP_SIZE         # 50% overlap for stable prediction
     
     # 1. CQT Extraction
     status_drawer.update(label="🧬 Step 2: Extracting Log-CQT Features...", state="running")
@@ -545,73 +484,68 @@ def predict_chords(y, sr, model_type, status_drawer):
     if os.path.exists(checkpoint_path):
         model.load_state_dict(torch.load(checkpoint_path, map_location=device))
     else:
-        st.toast(f"No checkpoint found at {checkpoint_path}. Running default fallback parameters.", icon="⚠️")
+        st.error(f"❌ Critical Error: Checkpoint not found at {checkpoint_path}. Execution halted.")
+        st.stop()
         
     model.to(device)
     model.eval()
     
-    # 3. Normalization
-    cqt_tensor = torch.FloatTensor(cqt_magnitude).unsqueeze(0).to(device)
+    # Convert CQT matrix to PyTorch Tensor and apply log compression
+    cqt_tensor = torch.FloatTensor(cqt_magnitude).unsqueeze(0).to(device) # shape: [1, 84, total_frames]
     cqt_tensor = torch.log1p(cqt_tensor * 10.0)
-    mean = cqt_tensor.mean(dim=(1, 2), keepdim=True)
-    std = cqt_tensor.std(dim=(1, 2), keepdim=True) + 1e-8
-    cqt_tensor = (cqt_tensor - mean) / std
+    total_frames = cqt_tensor.size(2)
     
-    cqt_tensor = cqt_tensor.permute(0, 2, 1)
-    total_frames = cqt_tensor.size(1)
-    
-    status_drawer.update(label="🧠 Step 4: Computing Transformer Attention Matrix...", state="running")
+    status_drawer.update(label="🧠 Step 4: Computing Model Predictions...", state="running")
     
     logits_sum = torch.zeros(1, total_frames, 25, device=device)
     logits_count = torch.zeros(1, total_frames, 25, device=device)
     
-    if total_frames <= chunk_length:
-        pad_len = chunk_length - total_frames
-        if pad_len > 0:
-            padding_tensor = torch.zeros(1, pad_len, n_bins, device=device)
-            cqt_input = torch.cat([cqt_tensor, padding_tensor], dim=1)
-        else:
-            cqt_input = cqt_tensor
+    # Sliding window inference using exact sequence lengths and chunk-wise normalization
+    start_idx = 0
+    while start_idx < total_frames:
+        end_idx = min(start_idx + chunk_length, total_frames)
+        actual_chunk_len = end_idx - start_idx
+        
+        if actual_chunk_len < chunk_length:
+            if total_frames >= chunk_length:
+                start_idx = total_frames - chunk_length
+                end_idx = total_frames
+                actual_chunk_len = chunk_length
             
+        chunk = cqt_tensor[:, :, start_idx:end_idx]
+        
+        if actual_chunk_len < chunk_length:
+            # Pad if the entire song is shorter than 215 frames
+            pad_len = chunk_length - actual_chunk_len
+            padding = torch.zeros(1, n_bins, pad_len, device=device)
+            chunk = torch.cat([chunk, padding], dim=2)
+            
+        # Instance-wise Z-score normalization matching training exactly
+        mean = chunk.mean(dim=(1, 2), keepdim=True)
+        std = chunk.std(dim=(1, 2), keepdim=True) + 1e-8
+        chunk_norm = (chunk - mean) / std
+        
+        # Permute to shape [1, chunk_length, n_bins]
+        chunk_input = chunk_norm.permute(0, 2, 1)
+        
         with torch.no_grad():
-            chunk_logits = model(cqt_input)
-        logits = chunk_logits[:, :total_frames, :]
-    else:
-        start_idx = 0
-        while start_idx < total_frames:
-            if start_idx + chunk_length <= total_frames:
-                chunk = cqt_tensor[:, start_idx : start_idx + chunk_length, :]
-                with torch.no_grad():
-                    chunk_logits = model(chunk)
-                logits_sum[:, start_idx : start_idx + chunk_length, :] += chunk_logits
-                logits_count[:, start_idx : start_idx + chunk_length, :] += 1.0
-                start_idx += hop_size
-            else:
-                start_idx_last = total_frames - chunk_length
-                chunk = cqt_tensor[:, start_idx_last : total_frames, :]
-                with torch.no_grad():
-                    chunk_logits = model(chunk)
-                logits_sum[:, start_idx_last : total_frames, :] += chunk_logits
-                logits_count[:, start_idx_last : total_frames, :] += 1.0
-                break
-                
-        logits = logits_sum / (logits_count + 1e-8)
-        
+            chunk_logits = model(chunk_input) # shape: [1, chunk_length, 25]
+            
+        if actual_chunk_len < chunk_length and total_frames < chunk_length:
+            logits_sum[:, :total_frames, :] += chunk_logits[:, :total_frames, :]
+            logits_count[:, :total_frames, :] += 1.0
+            break
+        elif start_idx == total_frames - chunk_length:
+            logits_sum[:, start_idx:end_idx, :] += chunk_logits[:, :, :]
+            logits_count[:, start_idx:end_idx, :] += 1.0
+            break
+        else:
+            logits_sum[:, start_idx:end_idx, :] += chunk_logits[:, :actual_chunk_len, :]
+            logits_count[:, start_idx:end_idx, :] += 1.0
+            start_idx += hop_size
+            
+    logits = logits_sum / (logits_count + 1e-8)
     predictions = torch.argmax(logits, dim=2).squeeze(0).cpu().numpy()
-    
-    # Apply Majority Vote Smoothing with a smaller window size to preserve short passing chords
-    window_size = 5
-    half_w = window_size // 2
-    n_frames = len(predictions)
-    smoothed_predictions = np.copy(predictions)
-    
-    for idx in range(n_frames):
-        start_w = max(0, idx - half_w)
-        end_w = min(n_frames, idx + half_w + 1)
-        vals, counts = np.unique(predictions[start_w:end_w], return_counts=True)
-        smoothed_predictions[idx] = vals[np.argmax(counts)]
-        
-    predictions = smoothed_predictions
     
     chord_names = [
         'C:maj', 'C#:maj', 'D:maj', 'D#:maj', 'E:maj', 'F:maj', 'F#:maj', 'G:maj', 'G#:maj', 'A:maj', 'A#:maj', 'B:maj',
@@ -619,149 +553,88 @@ def predict_chords(y, sr, model_type, status_drawer):
         'N'
     ]
     
-    intervals = []
-    current_chord_id = predictions[0]
-    start_frame = 0
+    # 5. Beat Tracking & Quantization
+    status_drawer.update(label="🥁 Step 5: Detecting Musical Beats & Tempo...", state="running")
+    tempo, beat_frames = librosa.beat.beat_track(y=y, sr=sr, hop_length=hop_length)
+    beat_times = librosa.frames_to_time(beat_frames, sr=sr, hop_length=hop_length)
     
-    for i in range(1, len(predictions)):
-        if predictions[i] != current_chord_id:
-            end_frame = i
-            start_time = start_frame * hop_length / sr
-            end_time = end_frame * hop_length / sr
-            chord_name = chord_names[current_chord_id]
-            intervals.append({
-                'Start Time (s)': round(start_time, 2),
-                'End Time (s)': round(end_time, 2),
-                'Chord': chord_name,
-                'Root': chord_name.split(':')[0] if ':' in chord_name else chord_name
-            })
-            start_frame = i
-            current_chord_id = predictions[i]
+    # Ensure full coverage of the timeline
+    total_duration = len(y) / sr
+    beat_times = np.concatenate(([0.0], beat_times, [total_duration]))
+    if len(beat_times) <= 2:
+        # Fallback to a 0.5-second grid if no beats detected
+        beat_times = np.arange(0.0, total_duration, 0.5)
+        if beat_times[-1] < total_duration:
+            beat_times = np.append(beat_times, total_duration)
             
-    end_frame = len(predictions)
-    start_time = start_frame * hop_length / sr
-    end_time = end_frame * hop_length / sr
-    chord_name = chord_names[current_chord_id]
-    intervals.append({
-        'Start Time (s)': round(start_time, 2),
-        'End Time (s)': round(end_time, 2),
-        'Chord': chord_name,
-        'Root': chord_name.split(':')[0] if ':' in chord_name else chord_name
-    })
-    
-    # Strict Segment Compactor: combine slots and merge segments under 0.1 seconds
-    compacted = []
-    for seg in intervals:
-        duration = seg['End Time (s)'] - seg['Start Time (s)']
-        if duration >= 0.1:
-            compacted.append(seg)
+    # Quantize predictions to beat intervals using majority vote
+    beat_predictions = []
+    for i in range(len(beat_times) - 1):
+        t_start = beat_times[i]
+        t_end = beat_times[i+1]
+        
+        # Map time boundary to frame index boundary
+        frame_start = int(np.round(t_start * sr / hop_length))
+        frame_end = int(np.round(t_end * sr / hop_length))
+        
+        frame_start = max(0, min(frame_start, len(predictions) - 1))
+        frame_end = max(frame_start + 1, min(frame_end, len(predictions)))
+        
+        interval_preds = predictions[frame_start:frame_end]
+        if len(interval_preds) > 0:
+            vals, counts = np.unique(interval_preds, return_counts=True)
+            dominant_chord_id = vals[np.argmax(counts)]
         else:
-            if compacted:
-                compacted[-1]['End Time (s)'] = seg['End Time (s)']
-            else:
-                compacted.append(seg)
+            dominant_chord_id = predictions[frame_start]
+            
+        beat_predictions.append(dominant_chord_id)
+        
+    chord_names = [
+        'C:maj', 'C#:maj', 'D:maj', 'D#:maj', 'E:maj', 'F:maj', 'F#:maj', 'G:maj', 'G#:maj', 'A:maj', 'A#:maj', 'B:maj',
+        'C:min', 'C#:min', 'D:min', 'D#:min', 'E:min', 'F:min', 'F#:min', 'G:min', 'G#:min', 'A:min', 'A#:min', 'B:min',
+        'N'
+    ]
+    
+    # 6. Event-Driven Compression
+    compressed_segments = []
+    if len(beat_predictions) > 0:
+        current_chord_id = beat_predictions[0]
+        start_idx = 0
+        
+        for i in range(1, len(beat_predictions)):
+            if beat_predictions[i] != current_chord_id:
+                end_idx = i
+                start_time = beat_times[start_idx]
+                end_time = beat_times[end_idx]
+                chord_name = chord_names[current_chord_id]
+                compressed_segments.append({
+                    'Start Time (s)': round(start_time, 2),
+                    'End Time (s)': round(end_time, 2),
+                    'Start Beat': start_idx,
+                    'End Beat': end_idx,
+                    'Chord': chord_name,
+                    'Root': chord_name.split(':')[0] if ':' in chord_name else chord_name,
+                    'Duration (Beats)': end_idx - start_idx
+                })
+                current_chord_id = beat_predictions[i]
+                start_idx = i
                 
-    # Final contiguous merge sweep
-    final_segments = []
-    for seg in compacted:
-        if final_segments and final_segments[-1]['Chord'] == seg['Chord']:
-            final_segments[-1]['End Time (s)'] = seg['End Time (s)']
-        else:
-            final_segments.append(seg)
-            
-    return pd.DataFrame(final_segments)
-
-
-# Widescreen Plotly Timeline Figure (Waveform + Segment blocks)
-def create_timeline_plot(y, sr, total_duration, df_chords):
-    # 1. Downsample waveform
-    downsample_factor = max(1, len(y) // 2000)
-    y_down = y[::downsample_factor]
-    time_down = np.linspace(0, total_duration, len(y_down))
-    
-    # Create subplots: Row 1 (Waveform), Row 2 (Chords Timeline)
-    fig = make_subplots(
-        rows=2, cols=1, 
-        shared_xaxes=True, 
-        vertical_spacing=0.08,
-        row_heights=[0.3, 0.7]
-    )
-    
-    # Add Waveform envelope (Row 1)
-    fig.add_trace(
-        go.Scatter(
-            x=time_down, 
-            y=y_down, 
-            line=dict(color='#64748B', width=1.5),
-            fill='tozeroy',
-            fillcolor='rgba(148, 163, 184, 0.15)',
-            hoverinfo='skip',
-            name="Waveform"
-        ),
-        row=1, col=1
-    )
-    
-    # Set Axes parameters
-    fig.update_yaxes(range=[0, 1], showgrid=False, showticklabels=False, row=2, col=1)
-    fig.update_yaxes(showgrid=False, row=1, col=1)
-    fig.update_xaxes(showgrid=True, gridcolor='#E2E8F0', row=2, col=1)
-    fig.update_xaxes(showgrid=True, gridcolor='#E2E8F0', row=1, col=1)
-    
-    # Beautiful color palette for chord roots
-    root_colors = {
-        'C': '#EF4444', 'C#': '#F97316', 'D': '#F59E0B', 'D#': '#EAB308',
-        'E': '#10B981', 'F': '#14B8A6', 'F#': '#06B6D4', 'G': '#3B82F6',
-        'G#': '#6366F1', 'A': '#8B5CF6', 'A#': '#A855F7', 'B': '#EC4899',
-        'N': '#94A3B8'
-    }
-    
-    # Add rectangles for chord segments in Row 2
-    for _, row in df_chords.iterrows():
-        start = row['Start Time (s)']
-        end = row['End Time (s)']
-        chord = row['Chord']
+        # Append the final segment
+        end_idx = len(beat_predictions)
+        start_time = beat_times[start_idx]
+        end_time = beat_times[end_idx]
+        chord_name = chord_names[current_chord_id]
+        compressed_segments.append({
+            'Start Time (s)': round(start_time, 2),
+            'End Time (s)': round(end_time, 2),
+            'Start Beat': start_idx,
+            'End Beat': end_idx,
+            'Chord': chord_name,
+            'Root': chord_name.split(':')[0] if ':' in chord_name else chord_name,
+            'Duration (Beats)': end_idx - start_idx
+        })
         
-        # Parse root chord character for color mapping
-        root = chord.split(':')[0] if ':' in chord else chord
-        # Clean root name
-        root = root.replace('min', '').replace('maj', '').replace('dim', '').replace('aug', '').replace('7', '').strip()
-        color = root_colors.get(root, '#94A3B8')
-        
-        # Add background shape for the chord block
-        fig.add_shape(
-            type="rect",
-            xref="x2", yref="y2",
-            x0=start, y0=0.1,
-            x1=end, y1=0.9,
-            fillcolor=color,
-            line=dict(color="#FFFFFF", width=1.5),
-            layer="below"
-        )
-        
-        # Add single centered text annotation
-        duration = end - start
-        if duration > 0.3:
-            fig.add_annotation(
-                xref="x2", yref="y2",
-                x=(start + end) / 2,
-                y=0.5,
-                text=f"<b>{clean_chord_name(chord)}</b>",
-                showarrow=False,
-                font=dict(size=12, color="white", family="Outfit, Inter"),
-                align="center"
-            )
-            
-    # Set modern light styling for Plotly layout
-    fig.update_layout(
-        plot_bgcolor='#FFFFFF',
-        paper_bgcolor='#FFFFFF',
-        margin=dict(l=20, r=20, t=10, b=20),
-        showlegend=False,
-        height=350,
-        dragmode=False
-    )
-    
-    return fig
+    return pd.DataFrame(compressed_segments), beat_times
 
 
 # Main App Process Trigger
@@ -796,16 +669,19 @@ if uploaded_file is not None:
                     tempo_bpm, key_signature = estimate_tempo_and_key(y, sr)
                     
                     # Execute CQT + Sliding Window Inference
-                    df_chords = predict_chords(y, sr, model_type, status_element)
+                    df_chords, beat_times = predict_chords(y, sr, model_type, status_element)
                     
-                    # Synthesize guide track once
-                    status_element.update(label="🎹 Synthesizing Harmonic Guide Track via NumPy Oscillators...", state="running")
+                    # Pre-process Chord names & Roman numerals
+                    flat_keys = {
+                        'F Major', 'Bb Major', 'Eb Major', 'Ab Major', 'Db Major', 'Gb Major',
+                        'D Minor', 'G Minor', 'C Minor', 'F Minor', 'Bb Minor', 'Eb Minor'
+                    }
+                    use_flats = key_signature in flat_keys
+                    if use_flats:
+                        df_chords['Chord'] = df_chords['Chord'].apply(lambda c: spell_chord(c, True))
+                        
                     df_chords['Chord_Clean'] = df_chords['Chord'].apply(clean_chord_name)
                     df_chords['Roman'] = df_chords.apply(lambda r: get_roman_numeral(r['Chord'], key_signature), axis=1)
-                    df_chords = assign_chord_pitches(df_chords)
-                    
-                    # Cache synthesized chords guide track in session state
-                    guide_wav = synthesize_chords_guide(df_chords, total_duration, sr)
                     
                     # Store variables in session state to prevent reprocessing
                     st.session_state.y = y
@@ -815,7 +691,7 @@ if uploaded_file is not None:
                     st.session_state.tempo_bpm = tempo_bpm
                     st.session_state.key_signature = key_signature
                     st.session_state.df_chords = df_chords
-                    st.session_state.guide_wav = guide_wav
+                    st.session_state.beat_times = beat_times
                     st.session_state.processed_file_key = file_key
                     
                     # Complete the status drawer
@@ -833,7 +709,8 @@ if uploaded_file is not None:
         tempo_bpm = st.session_state.tempo_bpm
         key_signature = st.session_state.key_signature
         df_chords = st.session_state.df_chords
-        guide_wav = st.session_state.guide_wav
+
+        beat_times = st.session_state.beat_times
         
         # Compute dominant chord
         most_frequent = df_chords['Chord'].mode()[0] if not df_chords.empty else "N"
@@ -842,429 +719,63 @@ if uploaded_file is not None:
         # Consolidate metadata badges inside sidebar
         st.sidebar.markdown("---")
         st.sidebar.markdown("<h4 style='font-family:Outfit,sans-serif;font-weight:700;color:#0F172A;'>📊 Track Profile & Key</h4>", unsafe_allow_html=True)
-        st.sidebar.markdown(f"""
-            <div class="sidebar-badge-container">
-                <div class="sidebar-badge">
-                    <span class="badge-label">⏱️ Duration</span>
-                    <span class="badge-value">{duration_formatted}</span>
-                </div>
-                <div class="sidebar-badge">
-                    <span class="badge-label">🥁 Tempo</span>
-                    <span class="badge-value">{tempo_bpm} BPM</span>
-                </div>
-                <div class="sidebar-badge">
-                    <span class="badge-label">🔑 Key Signature</span>
-                    <span class="badge-value">{key_signature}</span>
-                </div>
-                <div class="sidebar-badge">
-                    <span class="badge-label">🎯 Dominant Chord</span>
-                    <span class="badge-value">{most_frequent_clean}</span>
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
+        badges_html = (
+            f'<div class="sidebar-badge-container">'
+            f'<div class="sidebar-badge">'
+            f'<span class="badge-label">⏱️ Duration</span>'
+            f'<span class="badge-value">{duration_formatted}</span>'
+            f'</div>'
+            f'<div class="sidebar-badge">'
+            f'<span class="badge-label">🥁 Tempo</span>'
+            f'<span class="badge-value">{tempo_bpm} BPM</span>'
+            f'</div>'
+            f'<div class="sidebar-badge">'
+            f'<span class="badge-label">🔑 Key Signature</span>'
+            f'<span class="badge-value">{key_signature}</span>'
+            f'</div>'
+            f'<div class="sidebar-badge">'
+            f'<span class="badge-label">🎯 Dominant Chord</span>'
+            f'<span class="badge-value">{most_frequent_clean}</span>'
+            f'</div>'
+            f'</div>'
+        )
+        st.sidebar.markdown(badges_html, unsafe_allow_html=True)
         
-        # Render Sidebar Control Pod HTML5 Iframe
-        st.sidebar.markdown("---")
-        st.sidebar.markdown("<h4 style='font-family:Outfit,sans-serif;font-weight:700;color:#0F172A;'>🎛️ Volume & Playback Controls</h4>", unsafe_allow_html=True)
-        
-        backing_wav = y_to_wav_bytes(y, sr)
-        backing_b64 = to_base64_str(backing_wav)
-        guide_b64 = to_base64_str(guide_wav)
-        
-        # Format chords list to JSON with MIDI notes
-        chords_list = []
-        for _, row in df_chords.iterrows():
-            start = row['Start Time (s)']
-            end = row['End Time (s)']
-            chord = row['Chord_Clean']
-            roman = row['Roman']
-            chords_list.append({
-                "chord": chord,
-                "roman": roman,
-                "start": start,
-                "end": end
-            })
-        chords_json = json.dumps(chords_list)
-        
-        html_controls = """
-        <!DOCTYPE html>
-        <html lang="en">
-        <head>
-            <meta charset="UTF-8">
-            <style>
-                body {
-                    margin: 0;
-                    padding: 0;
-                    background-color: transparent;
-                    font-family: 'Inter', sans-serif;
-                    color: #1E293B;
-                    overflow: hidden;
-                }
-                .control-card {
-                    background: #FFFFFF;
-                    border: 1px solid #E2E8F0;
-                    border-radius: 12px;
-                    padding: 14px;
-                    box-shadow: 0 4px 12px rgba(148, 163, 184, 0.05);
-                    display: flex;
-                    flex-direction: column;
-                    gap: 12px;
-                }
-                .btn-play {
-                    background: linear-gradient(135deg, #7928CA 0%, #00DFD8 100%);
-                    color: #FFFFFF;
-                    border: none;
-                    border-radius: 50%;
-                    width: 52px;
-                    height: 52px;
-                    font-size: 18px;
-                    font-weight: bold;
-                    display: flex;
-                    align-items: center;
-                    justify-content: center;
-                    margin: 0 auto;
-                    cursor: pointer;
-                    transition: transform 0.2s, box-shadow 0.2s;
-                    box-shadow: 0 4px 12px rgba(121, 40, 202, 0.2);
-                    outline: none;
-                }
-                .btn-play:hover {
-                    transform: scale(1.05);
-                    box-shadow: 0 6px 16px rgba(121, 40, 202, 0.35);
-                }
-                .btn-play:active {
-                    transform: scale(0.98);
-                }
-                .slider-group {
-                    display: flex;
-                    flex-direction: column;
-                    gap: 4px;
-                }
-                .slider-label {
-                    font-size: 0.72rem;
-                    font-weight: 700;
-                    color: #64748B;
-                    text-transform: uppercase;
-                    letter-spacing: 0.05em;
-                    display: flex;
-                    justify-content: space-between;
-                }
-                input[type=range] {
-                    -webkit-appearance: none;
-                    width: 100%;
-                    background: transparent;
-                    margin: 0;
-                }
-                input[type=range]:focus {
-                    outline: none;
-                }
-                input[type=range]::-webkit-slider-runnable-track {
-                    width: 100%;
-                    height: 6px;
-                    cursor: pointer;
-                    background: #E2E8F0;
-                    border-radius: 3px;
-                }
-                input[type=range]::-webkit-slider-thumb {
-                    height: 14px;
-                    width: 14px;
-                    border-radius: 50%;
-                    background: #7928CA;
-                    cursor: pointer;
-                    -webkit-appearance: none;
-                    margin-top: -4px;
-                    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-                    transition: background 0.15s;
-                }
-                input[type=range]::-webkit-slider-thumb:hover {
-                    background: #00DFD8;
-                }
-                .active-chord-display {
-                    font-size: 1.4rem;
-                    font-weight: 800;
-                    color: #7928CA;
-                    text-align: center;
-                    padding: 8px;
-                    background: #F8FAFC;
-                    border-radius: 8px;
-                    border: 1px solid #E2E8F0;
-                    font-family: 'Outfit', sans-serif;
-                    letter-spacing: 0.05em;
-                    min-height: 32px;
-                    display: flex;
-                    align-items: center;
-                    justify-content: center;
-                    text-shadow: 0 1px 2px rgba(121, 40, 202, 0.05);
-                    user-select: none;
-                }
-            </style>
-        </head>
-        <body>
-            <div class="control-card">
-                <button class="btn-play" id="playBtn">▶</button>
-                
-                <div class="slider-group">
-                    <div class="slider-label">
-                        <span>Audio Vol</span>
-                        <span id="audioVolVal">80%</span>
-                    </div>
-                    <input type="range" id="audioVol" min="0" max="1" step="0.01" value="0.8">
-                </div>
-                
-                <div class="slider-group">
-                    <div class="slider-label">
-                        <span>Chord Vol</span>
-                        <span id="chordVolVal">50%</span>
-                    </div>
-                    <input type="range" id="chordVol" min="0" max="1" step="0.01" value="0.5">
-                </div>
-                
-                <div class="active-chord-display" id="activeChord">NO CHORD</div>
-                
-                <audio id="backingAudio" src="data:audio/wav;base64,__BACKING_B64__"></audio>
-                <audio id="guideAudio" src="data:audio/wav;base64,__GUIDE_B64__"></audio>
-            </div>
-
-            <script>
-                const backingAudio = document.getElementById('backingAudio');
-                const guideAudio = document.getElementById('guideAudio');
-                const playBtn = document.getElementById('playBtn');
-                const audioVol = document.getElementById('audioVol');
-                const chordVol = document.getElementById('chordVol');
-                const audioVolVal = document.getElementById('audioVolVal');
-                const chordVolVal = document.getElementById('chordVolVal');
-                const activeChordEl = document.getElementById('activeChord');
-
-                // Parse serialized chords data from python
-                const chords = __CHORDS_JSON__;
-                const duration = __DURATION__;
-
-                // Sync volumes initially
-                backingAudio.volume = parseFloat(audioVol.value);
-                guideAudio.volume = parseFloat(chordVol.value);
-
-                // Listeners for volume change
-                audioVol.addEventListener('input', (e) => {
-                    const val = parseFloat(e.target.value);
-                    backingAudio.volume = val;
-                    audioVolVal.textContent = Math.round(val * 100) + '%';
-                });
-
-                chordVol.addEventListener('input', (e) => {
-                    const val = parseFloat(e.target.value);
-                    guideAudio.volume = val;
-                    chordVolVal.textContent = Math.round(val * 100) + '%';
-                });
-
-                // Play / Pause toggle function
-                function togglePlay() {
-                    if (backingAudio.paused) {
-                        backingAudio.play().catch(err => console.log("Backing play error", err));
-                        guideAudio.currentTime = backingAudio.currentTime;
-                        guideAudio.play().catch(err => console.log("Guide play error", err));
-                        playBtn.textContent = '⏸';
-                    } else {
-                        backingAudio.pause();
-                        guideAudio.pause();
-                        playBtn.textContent = '▶';
-                    }
-                }
-
-                playBtn.addEventListener('click', togglePlay);
-
-                // Synchronize times on play and seeking
-                backingAudio.addEventListener('play', () => {
-                    guideAudio.currentTime = backingAudio.currentTime;
-                    guideAudio.play().catch(err => console.log("Guide audio play deferred", err));
-                    playBtn.textContent = '⏸';
-                });
-
-                backingAudio.addEventListener('pause', () => {
-                    guideAudio.pause();
-                    playBtn.textContent = '▶';
-                });
-
-                backingAudio.addEventListener('seeking', () => {
-                    guideAudio.currentTime = backingAudio.currentTime;
-                });
-                backingAudio.addEventListener('seeked', () => {
-                    guideAudio.currentTime = backingAudio.currentTime;
-                });
-                backingAudio.addEventListener('ratechange', () => {
-                    guideAudio.playbackRate = backingAudio.playbackRate;
-                });
-
-                // Global Spacebar shortcut inside this iframe and parent window
-                function setupSpacebar() {
-                    const handleSpacebar = (e) => {
-                        if (e.code === 'Space') {
-                            const activeEl = document.activeElement;
-                            if (activeEl && (activeEl.tagName === 'INPUT' || activeEl.tagName === 'TEXTAREA' || activeEl.isContentEditable)) {
-                                return;
-                            }
-                            e.preventDefault();
-                            togglePlay();
-                        }
-                    };
-                    
-                    window.addEventListener('keydown', handleSpacebar);
-                    
-                    try {
-                        const parentWindow = window.parent;
-                        if (parentWindow) {
-                            parentWindow.addEventListener('keydown', handleSpacebar);
-                        }
-                    } catch (err) {
-                        console.log("Could not bind spacebar to parent window:", err);
-                    }
-                }
-                setupSpacebar();
-
-                // Playhead & Active Chord animation loop targeting parent window Plotly chart
-                function drawPlayhead() {
-                    try {
-                        const parentDoc = window.parent.document;
-                        const wrapper = parentDoc.getElementById('timeline-wrapper');
-                        if (wrapper) {
-                            let playhead = parentDoc.getElementById('plotly-playhead');
-                            if (!playhead) {
-                                playhead = parentDoc.createElement('div');
-                                playhead.id = 'plotly-playhead';
-                                playhead.style.position = 'absolute';
-                                playhead.style.width = '2px';
-                                playhead.style.backgroundColor = '#EF4444';
-                                playhead.style.pointerEvents = 'none';
-                                playhead.style.zIndex = '100';
-                                
-                                const dot = parentDoc.createElement('div');
-                                dot.style.position = 'absolute';
-                                dot.style.top = '-4px';
-                                dot.style.left = '-3px';
-                                dot.style.width = '8px';
-                                dot.style.height = '8px';
-                                dot.style.borderRadius = '50%';
-                                dot.style.backgroundColor = '#EF4444';
-                                playhead.appendChild(dot);
-                                
-                                wrapper.appendChild(playhead);
-                            }
-                            
-                            const gd = wrapper.querySelector('.js-plotly-plot');
-                            if (gd && gd._fullLayout && gd._fullLayout.xaxis) {
-                                const curTime = backingAudio.currentTime;
-                                const xaxis = gd._fullLayout.xaxis;
-                                const margin = gd._fullLayout.margin;
-                                const xPixel = xaxis.l2p(curTime);
-                                
-                                if (xPixel !== undefined && !isNaN(xPixel)) {
-                                    const left = xPixel + margin.l;
-                                    playhead.style.left = left + 'px';
-                                    playhead.style.top = margin.t + 'px';
-                                    playhead.style.height = (gd._fullLayout.height - margin.t - margin.b) + 'px';
-                                    playhead.style.display = 'block';
-                                } else {
-                                    playhead.style.display = 'none';
-                                }
-                            } else {
-                                playhead.style.display = 'none';
-                            }
-                        }
-                    } catch (err) {
-                        // Suppress cross-origin errors
-                    }
-
-                    // Update Active Chord Name
-                    try {
-                        const curTime = backingAudio.currentTime;
-                        let active = null;
-                        for (let i = 0; i < chords.length; i++) {
-                            if (curTime >= chords[i].start && curTime <= chords[i].end) {
-                                active = chords[i];
-                                break;
-                            }
-                        }
-                        if (activeChordEl) {
-                            if (active && active.chord !== 'N') {
-                                const romanPart = active.roman ? ` (${active.roman})` : '';
-                                activeChordEl.textContent = active.chord + romanPart;
-                                activeChordEl.style.color = '#7928CA';
-                            } else {
-                                activeChordEl.textContent = 'NO CHORD';
-                                activeChordEl.style.color = '#64748B';
-                            }
-                        }
-                    } catch (err) {
-                        console.log(err);
-                    }
-
-                    requestAnimationFrame(drawPlayhead);
-                }
-                requestAnimationFrame(drawPlayhead);
-
-                // Parent click listener to seek playhead
-                function setupParentClickListener() {
-                    try {
-                        const parentDoc = window.parent.document;
-                        const wrapper = parentDoc.getElementById('timeline-wrapper');
-                        if (wrapper) {
-                            if (wrapper.dataset.clickBound === 'true') return;
-                            
-                            const handlePlotClick = (e) => {
-                                const gd = wrapper.querySelector('.js-plotly-plot');
-                                if (gd && gd._fullLayout && gd._fullLayout.xaxis) {
-                                    const rect = gd.getBoundingClientRect();
-                                    const clickX = e.clientX - rect.left;
-                                    const margin = gd._fullLayout.margin;
-                                    const plotWidth = gd._fullLayout.width - margin.l - margin.r;
-                                    const relativeX = clickX - margin.l;
-                                    
-                                    if (relativeX >= 0 && relativeX <= plotWidth) {
-                                        const pct = relativeX / plotWidth;
-                                        const seekTime = pct * duration;
-                                        backingAudio.currentTime = seekTime;
-                                        guideAudio.currentTime = seekTime;
-                                    }
-                                }
-                            };
-                            
-                            wrapper.addEventListener('click', handlePlotClick);
-                            wrapper.dataset.clickBound = 'true';
-                        }
-                    } catch (err) {
-                        console.log("Could not bind click listener to parent plot:", err);
-                    }
-                }
-
-                // Retry binding click listener until Plotly container is ready
-                let retries = 0;
-                const intervalId = setInterval(() => {
-                    setupParentClickListener();
-                    retries++;
-                    if (retries > 30) clearInterval(intervalId);
-                }, 100);
-            </script>
-        </body>
-        </html>
-        """
-        
-        html_controls = html_controls.replace("__BACKING_B64__", backing_b64)
-        html_controls = html_controls.replace("__GUIDE_B64__", guide_b64)
-        html_controls = html_controls.replace("__CHORDS_JSON__", chords_json)
-        html_controls = html_controls.replace("__DURATION__", str(total_duration))
-        
-        # Render the custom controls inside st.sidebar
+        # PR4 SAFE UI: native audio only (no custom iframe controls, no parent DOM access)
         with st.sidebar:
-            st.components.v1.html(html_controls, height=270)
-        
-        # Main area timeline visualization
-        st.markdown("<h3 class='section-title'>📈 Spectro-Temporal Alignment Timeline</h3>", unsafe_allow_html=True)
-        
-        # Wrap Plotly figure inside canvas-card with timeline-wrapper id
-        st.markdown('<div id="timeline-wrapper" class="canvas-card" style="position: relative;">', unsafe_allow_html=True)
-        fig = create_timeline_plot(y, sr, total_duration, df_chords)
-        st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
-        st.markdown('</div>', unsafe_allow_html=True)
-        
+            st.audio(y, sample_rate=sr)
+
+        # Safe Plotly timeline + manual scrub (replaces all old beat-grid + JS sync)
+        st.markdown("<h3 class='section-title'>🎵 Chord Timeline (scrub to preview)</h3>", unsafe_allow_html=True)
+
+        if "scrub_time" not in st.session_state:
+            st.session_state.scrub_time = 0.0
+
+        scrub_time = st.slider("Scrub time (s)", 0.0, float(total_duration), float(st.session_state.scrub_time), 0.05, key="scrub_slider")
+        st.session_state.scrub_time = scrub_time
+
+        fig = build_chord_timeline_figure(y, sr, df_chords, scrub_time=scrub_time)
+        st.plotly_chart(fig, use_container_width=True, key="chord_timeline")
+
+        # Live badge
+        cur = df_chords[(df_chords["Start Time (s)"] <= scrub_time) & (df_chords["End Time (s)"] > scrub_time)]
+        if not cur.empty:
+            r = cur.iloc[0]
+            st.markdown(f"<div style='font-size:1.25rem;font-weight:800;color:#7928CA;padding:3px 8px;background:#F1E7FF;border-radius:6px;display:inline-block;'>Now: <b>{r.get('Chord_Clean', r.get('Chord','N'))}</b> {r.get('Roman','')}</div>", unsafe_allow_html=True)
+        else:
+            st.caption("N / silence")
+
+        # Safe click-to-scrub (limited buttons, pure Streamlit)
+        st.markdown("**Beat nav (click to jump)**")
+        mb = min(24, len(beat_times)-1)
+        if mb > 0:
+            bcols = st.columns(min(8, mb))
+            for b in range(mb):
+                with bcols[b % 8]:
+                    if st.button(str(b), key=f"bnav{b}"):
+                        st.session_state.scrub_time = float(beat_times[b])
+                        st.rerun()
+
         # Bottom controls and utilities
         col_btn1, col_btn2 = st.columns(2)
         
@@ -1286,9 +797,9 @@ if uploaded_file is not None:
         st.markdown("---")
         
         # Hide raw frame registry inside expander
-        with st.expander("📋 View Frame-by-Frame Chord Index Registry"):
+        with st.expander("📋 View Analytical Chord Registry Data"):
             st.dataframe(
-                df_chords[['Start Time (s)', 'End Time (s)', 'Chord_Clean', 'Roman']], 
+                df_chords[['Start Time (s)', 'End Time (s)', 'Start Beat', 'End Beat', 'Chord_Clean', 'Roman']], 
                 use_container_width=True
             )
             
@@ -1304,14 +815,16 @@ else:
     # Sidebar prompt layout card
     st.info("👈 Please upload an audio file (.wav, .mp3, etc.) in the sidebar to run the analysis.")
     
-    st.markdown("""
-        <div style="background: white; border: 1px solid #E2E8F0; padding: 2rem; border-radius: 20px; box-shadow: 0 8px 24px rgba(148,163,184,0.02); margin-top: 1rem;">
-            <h3 style="font-family: Outfit, sans-serif; font-weight: 700; margin-top: 0; color: #0F172A;">💡 System Workflow Instructions</h3>
-            <ol style="margin-bottom: 0; padding-left: 1.25rem; color: #334155;">
-                <li style="margin-bottom: 0.75rem;"><strong>Parameters</strong>: Adjust model architectures using the panel in the sidebar.</li>
-                <li style="margin-bottom: 0.75rem;"><strong>Upload</strong>: Drag & drop your target audio file into the zone.</li>
-                <li style="margin-bottom: 0.75rem;"><strong>Transcription</strong>: The system executes feature extraction, key & tempo analysis, and sequence inference inside a sliding-window frame to ensure compatibility.</li>
-                <li style="margin-bottom: 0.75rem;"><strong>Analysis</strong>: Observe chord overlays aligned directly onto the audio wave visualization.</li>
-            </ol>
-        </div>
-        """, unsafe_allow_html=True)
+    instructions_html = (
+        '<div style="background: white; border: 1px solid #E2E8F0; padding: 2rem; border-radius: 20px; box-shadow: 0 8px 24px rgba(148,163,184,0.02); margin-top: 1rem;">'
+        '<h3 style="font-family: Outfit, sans-serif; font-weight: 700; margin-top: 0; color: #0F172A;">💡 System Workflow Instructions</h3>'
+        '<ol style="margin-bottom: 0; padding-left: 1.25rem; color: #334155;">'
+        '<li style="margin-bottom: 0.75rem;"><strong>Parameters</strong>: Adjust model architectures using the panel in the sidebar.</li>'
+        '<li style="margin-bottom: 0.75rem;"><strong>Upload</strong>: Drag & drop your target audio file into the zone.</li>'
+        '<li style="margin-bottom: 0.75rem;"><strong>Transcription</strong>: The system executes feature extraction, key & tempo analysis, and sequence inference inside a sliding-window frame to ensure compatibility.</li>'
+        '<li style="margin-bottom: 0.75rem;"><strong>Analysis</strong>: Observe chord overlays aligned directly onto the audio wave visualization.</li>'
+        '</ol>'
+        '</div>'
+    )
+    st.markdown(instructions_html, unsafe_allow_html=True)
+

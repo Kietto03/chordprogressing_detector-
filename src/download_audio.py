@@ -1,10 +1,8 @@
 import os
-import sys
 import pandas as pd
+import librosa
 from yt_dlp import YoutubeDL
 
-# Đảm bảo nhận diện đúng đường dẫn hệ thống
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 def download_audio_from_youtube():
     # 1. Định nghĩa đường dẫn
@@ -15,7 +13,7 @@ def download_audio_from_youtube():
         return
 
     # Lấy danh sách tất cả các ID bài hát (tên folder dạng số: 0001, 0002...)
-    song_ids = [f for f in os.listdir(raw_dir) if os.path.isdir(os.path.join(raw_dir, f))]
+    song_ids = [f for f in os.listdir(raw_dir) if os.path.isdir(os.path.join(raw_dir, f)) and f.isdigit()]
     song_ids = sorted(song_ids)  # Xóa limit để chạy hết tất cả các bài trong dataset.
 
     print(f"🎵 Tìm thấy {len(song_ids)} thư mục bài hát cần bổ sung Audio thực tế...")
@@ -64,12 +62,27 @@ def download_audio_from_youtube():
         print(f"🚀 Chuyển băng chuyền sang bài {song_id} -> Đang cào nhạc từ YouTube...")
         try:
             with YoutubeDL(ydl_opts) as ydl:
-                ydl.download([search_query])
-            
-            # Kiểm tra xem file audio thực sự tồn tại trong thư mục sau khi tải
+                info = ydl.extract_info(search_query, download=True)
+                # PR6: Log the actual video ID / title for auditability (helps debug wrong versions)
+                if info:
+                    video_id = info.get('id', 'unknown')
+                    video_title = info.get('title', 'unknown')
+                    print(f"   ↳ yt-dlp resolved to: id={video_id} title='{video_title}'")
+
+            # PR6: Post-download validation (duration + basic sanity)
             downloaded = [f for f in os.listdir(target_folder) if f.lower().endswith(('.mp3', '.wav', '.m4a', '.webm'))]
             if downloaded:
-                print(f"✅ Đã tải thành công audio thật cho bài {song_id}!")
+                audio_path = os.path.join(target_folder, downloaded[0])
+                try:
+                    # Quick load to verify it's real audio and has reasonable length
+                    y_check, sr_check = librosa.load(audio_path, sr=None, mono=True, duration=10)  # first 10s is enough
+                    dur = len(y_check) / sr_check
+                    if dur < 5.0:
+                        print(f"⚠️  Downloaded audio for {song_id} is very short ({dur:.1f}s). May be a preview or error.")
+                    else:
+                        print(f"✅ Đã tải thành công audio thật cho bài {song_id} (validated ~{dur:.1f}s)!")
+                except Exception as ve:
+                    print(f"⚠️  Downloaded file for {song_id} exists but failed librosa validation: {ve}")
             else:
                 print(f"❌ Không tìm thấy file audio sau khi tải cho bài {song_id} (Có thể tìm kiếm không thấy kết quả).")
         except Exception as e:
